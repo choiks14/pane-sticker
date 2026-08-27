@@ -13,7 +13,7 @@ namespace PaneSticker.Services;
 ///  1) 패인의 셸(powershell 등)은 WindowsTerminal.exe 의 직계 자식이고,
 ///     AttachConsole + GetConsoleTitle 로 그 패인의 콘솔 제목을 읽을 수 있다.
 ///     이 제목은 UIA 가 TermControl.HelpText 로 노출하는 패인 제목과 같다.
-///  2) 실제 작업 폴더는 셸 자신이 아니라 그 자손 프로세스(claude -> node 등)의 CWD 에 들어 있다.
+///  2) 실제 작업 폴더는 셸 자신이 아니라 셸에서 가장 가까운 자손 프로세스(claude -> node 등)의 CWD 에 있다.
 ///     PowerShell 은 Set-Location 을 해도 프로세스 CWD 를 바꾸지 않기 때문이다.
 /// </summary>
 public sealed class ShellProcessScanner
@@ -88,43 +88,46 @@ public sealed class ShellProcessScanner
         return result;
     }
 
-    /// <summary>셸과 그 자손들의 CWD 중 가장 그럴듯한 작업 폴더를 고른다.</summary>
+    /// <summary>
+    /// 셸에서 가장 가까운(=얕은) 자손의 CWD 를 작업 폴더로 삼는다.
+    ///
+    /// 최빈값을 쓰면 안 된다. Claude Code 같은 도구가 하위 디렉터리에서 잠깐씩 띄우는
+    /// bash/cmd 프로세스 때문에 표시 경로가 작업 중에 계속 흔들리기 때문이다.
+    /// 얕은 깊이를 우선하고, 같은 깊이면 더 짧은(=상위) 경로를 택하면
+    /// 세션이 시작된 프로젝트 루트로 고정된다.
+    /// </summary>
     private static string BestFolder(int shellPid, Dictionary<int, List<int>> childrenOf)
     {
-        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var queue = new Queue<int>();
-        queue.Enqueue(shellPid);
+        var queue = new Queue<(int Pid, int Depth)>();
+        queue.Enqueue((shellPid, 0));
+
+        int bestDepth = int.MaxValue;
+        string best = "";
         int visited = 0;
 
         while (queue.Count > 0 && visited < 400)
         {
-            int pid = queue.Dequeue();
+            var (pid, depth) = queue.Dequeue();
             visited++;
+
+            // BFS 라 깊이가 단조 증가한다. 이미 더 얕은 곳에서 찾았으면 여기서 멈춘다.
+            if (depth > bestDepth) continue;
 
             string cwd = ProcessCwd.Read(pid);
             if (IsMeaningful(cwd))
             {
                 cwd = cwd.TrimEnd('\\', '/');
-                counts[cwd] = counts.TryGetValue(cwd, out int c) ? c + 1 : 1;
+                if (depth < bestDepth || (depth == bestDepth && cwd.Length < best.Length))
+                {
+                    bestDepth = depth;
+                    best = cwd;
+                }
             }
 
             if (childrenOf.TryGetValue(pid, out var kids))
-                foreach (int kid in kids) queue.Enqueue(kid);
+                foreach (int kid in kids) queue.Enqueue((kid, depth + 1));
         }
 
-        if (counts.Count == 0) return "";
-
-        // 가장 자주 나오는 경로. 동률이면 더 짧은(=상위) 경로를 택해 프로젝트 루트를 잡는다.
-        string best = "";
-        int bestCount = -1;
-        foreach (var kv in counts)
-        {
-            if (kv.Value > bestCount || (kv.Value == bestCount && kv.Key.Length < best.Length))
-            {
-                best = kv.Key;
-                bestCount = kv.Value;
-            }
-        }
         return best;
     }
 
