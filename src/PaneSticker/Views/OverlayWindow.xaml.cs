@@ -241,9 +241,17 @@ public partial class OverlayWindow : Window
         Root.Children.Clear();
         var origin = snap.WindowBounds;
 
-        var accent = MakeBrush(_settings.AccentColor, Color.FromRgb(0x2D, 0x6F, 0xF7));
-        var focus = MakeBrush(_settings.FocusColor, Color.FromRgb(0xFF, 0x9F, 0x1C));
-        var textBrush = MakeBrush(_settings.TextColor, Colors.White);
+        Color accentColor = ParseColor(_settings.AccentColor, Color.FromRgb(0x2D, 0x6F, 0xF7));
+        Color focusColor = ParseColor(_settings.FocusColor, Color.FromRgb(0xFF, 0x9F, 0x1C));
+        Color preferredText = ParseColor(_settings.TextColor, Colors.White);
+
+        var accent = Frozen(accentColor);
+        var focus = Frozen(focusColor);
+
+        // 배지 배경이 밝으면(주황 등) 흰 글씨는 대비가 2:1 수준까지 떨어져 읽기 힘들다.
+        // 배경마다 대비가 더 좋은 글자색을 고른다.
+        var accentText = PickForeground(accentColor, preferredText);
+        var focusText = PickForeground(focusColor, preferredText);
 
         foreach (var pane in snap.Panes)
         {
@@ -276,7 +284,7 @@ public partial class OverlayWindow : Window
 
             if (!_settings.ShowBadges) continue;
 
-            var badge = BuildBadge(pane, color, textBrush);
+            var badge = BuildBadge(pane, color, pane.Focused ? focusText : accentText);
             if (badge == null) continue;   // 표기할 폴더가 없으면 테두리만 그린다
 
             double m = _settings.BadgeMargin;
@@ -393,20 +401,61 @@ public partial class OverlayWindow : Window
         catch { }
     }
 
-    private static SolidColorBrush MakeBrush(string value, Color fallback)
+    /// <summary>설정의 색상 문자열을 파싱한다. 형식이 틀리면 기본값.</summary>
+    private static Color ParseColor(string value, Color fallback)
     {
         try
         {
-            if (ColorConverter.ConvertFromString(value) is Color c)
-            {
-                var b = new SolidColorBrush(c);
-                b.Freeze();
-                return b;
-            }
+            if (ColorConverter.ConvertFromString(value) is Color c) return c;
         }
         catch { }
-        var fb = new SolidColorBrush(fallback);
-        fb.Freeze();
-        return fb;
+        return fallback;
+    }
+
+    private static SolidColorBrush Frozen(Color c)
+    {
+        var b = new SolidColorBrush(c);
+        b.Freeze();
+        return b;
+    }
+
+    /// <summary>배경 위에서 가장 잘 읽히는 글자색을 고른다.</summary>
+    private static SolidColorBrush PickForeground(Color background, Color preferred)
+    {
+        // 사용자가 고른 색이 WCAG AA(4.5:1)를 이미 만족하면 그대로 존중한다.
+        double best = Contrast(preferred, background);
+        if (best >= 4.5) return Frozen(preferred);
+
+        Color chosen = preferred;
+        foreach (Color candidate in new[] { DarkInk, Colors.White })
+        {
+            double ratio = Contrast(candidate, background);
+            if (ratio > best)
+            {
+                best = ratio;
+                chosen = candidate;
+            }
+        }
+        return Frozen(chosen);
+    }
+
+    /// <summary>밝은 배경(주황 등)에 쓰는 어두운 글자색.</summary>
+    private static readonly Color DarkInk = Color.FromRgb(0x14, 0x16, 0x1B);
+
+    // WCAG 2.x 대비비 계산
+    private static double Contrast(Color a, Color b)
+    {
+        double la = Luminance(a);
+        double lb = Luminance(b);
+        return (Math.Max(la, lb) + 0.05) / (Math.Min(la, lb) + 0.05);
+    }
+
+    private static double Luminance(Color c)
+        => 0.2126 * Channel(c.R) + 0.7152 * Channel(c.G) + 0.0722 * Channel(c.B);
+
+    private static double Channel(byte value)
+    {
+        double s = value / 255.0;
+        return s <= 0.04045 ? s / 12.92 : Math.Pow((s + 0.055) / 1.055, 2.4);
     }
 }
