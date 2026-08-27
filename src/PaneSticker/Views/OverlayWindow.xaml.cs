@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -19,6 +21,11 @@ public partial class OverlayWindow : Window
     private readonly AppSettings _settings;
     private IntPtr _hwnd;
     private string _renderedSignature = "";
+
+    // 마지막으로 적용한 배치. 값이 그대로면 창을 다시 건드리지 않아 깜빡임을 막는다.
+    private int _lastPx, _lastPy, _lastPw, _lastPh;
+    private double _lastSx = 1, _lastSy = 1;
+    private bool _placed;
 
     /// <summary>WM_HOTKEY 수신 시 hotkey id 전달.</summary>
     public event Action<int>? HotKeyPressed;
@@ -71,6 +78,7 @@ public partial class OverlayWindow : Window
         {
             if (IsVisible) Hide();
             _renderedSignature = "";
+            _placed = false;
             return;
         }
 
@@ -82,9 +90,33 @@ public partial class OverlayWindow : Window
         int pw = (int)Math.Round(wb.Width);
         int ph = (int)Math.Round(wb.Height);
 
+        // 창 위치/크기가 그대로면 아무것도 건드리지 않는다.
+        // SetWindowPos 나 Width/Height 대입은 매번 하면 레이어드 창이 다시 그려져 깜빡인다.
+        if (!_placed || px != _lastPx || py != _lastPy || pw != _lastPw || ph != _lastPh)
+        {
+            Reposition(px, py, pw, ph);
+        }
+
+        if (Math.Abs(Opacity - _settings.Opacity) > 0.001) Opacity = _settings.Opacity;
+
+        // 화면에 실제로 그려질 내용만으로 서명을 만든다.
+        // 패인 제목은 폴더를 찾는 데만 쓰이고 자주 바뀌므로, 표시 내용이 같으면 다시 그리지 않는다.
+        string sig = RenderSignature(snap);
+        if (sig == _renderedSignature) return;
+        _renderedSignature = sig;
+
+        Render(snap, _lastSx, _lastSy);
+    }
+
+    /// <summary>HWND(물리 픽셀)와 WPF 레이아웃(DIP)을 같은 목표로 맞춘다.</summary>
+    private void Reposition(int px, int py, int pw, int ph)
+    {
+        const uint flags = NativeMethods.SWP_NOACTIVATE
+                         | NativeMethods.SWP_NOOWNERZORDER
+                         | NativeMethods.SWP_SHOWWINDOW;
+
         // 1) HWND 를 물리 픽셀로 정확히 배치한다. 이게 유일하게 신뢰할 수 있는 기준이다.
-        NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST, px, py, pw, ph,
-            NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER | NativeMethods.SWP_SHOWWINDOW);
+        NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST, px, py, pw, ph, flags);
 
         // 2) WPF 가 DIP -> 디바이스 픽셀로 합성할 때 쓰는 실제 변환을 사용한다.
         //    AllowsTransparency 창은 고배율 모니터에서 레이아웃 DPI(VisualTreeHelper.GetDpi)와
@@ -108,22 +140,83 @@ public partial class OverlayWindow : Window
 
         DumpDpiOnce(pw, ph, sx, sy);
 
-        NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST, px, py, pw, ph,
-            NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER | NativeMethods.SWP_SHOWWINDOW);
+        NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST, px, py, pw, ph, flags);
 
-        Opacity = _settings.Opacity;
+        _lastPx = px; _lastPy = py; _lastPw = pw; _lastPh = ph;
+        _lastSx = sx; _lastSy = sy;
+        _placed = true;
+    }
 
-        string sig = snap.Signature + "|" + SettingsSignature() + "|" + sx + "x" + sy;
-        if (sig == _renderedSignature) return;
-        _renderedSignature = sig;
-
-        Render(snap, sx, sy);
+    private string RenderSignature(TrackerSnapshot snap)
+    {
+        var sb = new StringBuilder();
+        sb.Append(_lastSx).Append('x').Append(_lastSy).Append('|').Append(SettingsSignature()).Append('|');
+        foreach (var p in snap.Panes)
+        {
+            sb.Append((int)p.Bounds.X).Append(',').Append((int)p.Bounds.Y).Append(',')
+              .Append((int)p.Bounds.Width).Append(',').Append((int)p.Bounds.Height).Append(',')
+              .Append(p.Focused ? '1' : '0').Append(',').Append(BuildLabel(p)).Append(';');
+        }
+        return sb.ToString();
     }
 
     protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
     {
         base.OnDpiChanged(oldDpi, newDpi);
+        _placed = false;          // 배율이 바뀌었으니 다시 배치해야 한다
         InvalidateRender();
+    }
+
+    /// <summary>
+    /// 배지가 주어진 폭에 들어가도록 텍스트를 단계적으로 줄인다.
+    /// 경로는 앞쪽(드라이브)과 뒤쪽(현재 폴더)이 중요하므로 가운데를 생략한다.
+    /// </summary>
+    private static void FitBadge(Border badge, double maxWidth)
+    {
+        if (badge.Child is not TextBlock text)
+        {
+            badge.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            return;
+        }
+
+        foreach (string candidate in ElisionCandidates(text.Text))
+        {
+            text.Text = candidate;
+            badge.InvalidateMeasure();
+            badge.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            if (badge.DesiredSize.Width <= maxWidth) return;
+        }
+        // 어떤 후보도 못 맞추면 마지막(가장 짧은) 상태로 둔다.
+    }
+
+    /// <summary>원본부터 시작해 점점 짧아지는 표시 후보들.</summary>
+    private static IEnumerable<string> ElisionCandidates(string label)
+    {
+        yield return label;
+        if (string.IsNullOrEmpty(label)) yield break;
+
+        var parts = label.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+
+        // 1단계: 가운데 구간을 통째로 생략. "D:\a\b\c\d" -> "D:\…\c\d" -> "D:\…\d"
+        if (parts.Length >= 3)
+        {
+            string head = parts[0];
+            for (int keep = parts.Length - 2; keep >= 1; keep--)
+            {
+                yield return head + "\\…\\" + string.Join('\\', parts, parts.Length - keep, keep);
+            }
+        }
+
+        // 2단계: 그래도 넘치면 마지막 구간 자체를 가운데에서 자른다.
+        string tail = parts.Length > 0 ? parts[^1] : label;
+        for (int len = tail.Length - 1; len >= 5; len -= 2)
+        {
+            int front = (len + 1) / 2;
+            int back = len - front;
+            yield return tail.Substring(0, front) + "…" + tail.Substring(tail.Length - back, back);
+        }
+
+        yield return "…";
     }
 
     /// <summary>경로에서 마지막 구간(폴더 이름)만 뽑는다. 드라이브 루트면 "D:" 형태.</summary>
@@ -185,10 +278,13 @@ public partial class OverlayWindow : Window
 
             var badge = BuildBadge(pane, color, textBrush);
             if (badge == null) continue;   // 표기할 폴더가 없으면 테두리만 그린다
-            badge.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            var size = badge.DesiredSize;
 
             double m = _settings.BadgeMargin;
+
+            // 배지가 패인 폭을 넘으면 옆 구역까지 침범한다. 경로 가운데를 생략해 맞춘다.
+            FitBadge(badge, Math.Max(24, w - m * 2));
+            var size = badge.DesiredSize;
+
             double bx = _settings.BadgeAnchor switch
             {
                 BadgeAnchor.TopCenter => x + (w - size.Width) / 2,
@@ -209,7 +305,8 @@ public partial class OverlayWindow : Window
         }
     }
 
-    private Border? BuildBadge(PaneInfo pane, Brush background, Brush foreground)
+    /// <summary>배지에 쓸 문자열. 표기할 게 없으면 빈 문자열.</summary>
+    private string BuildLabel(PaneInfo pane)
     {
         // 수동 지정 이름이 있으면 항상 그게 우선.
         string label = _settings.GetLabel(pane.Index);
@@ -225,13 +322,21 @@ public partial class OverlayWindow : Window
             };
         }
 
-        if (string.IsNullOrWhiteSpace(label)) return null;
+        if (string.IsNullOrWhiteSpace(label)) return "";
 
         if (_settings.ShowTitle && !string.IsNullOrEmpty(pane.Title) &&
             !string.Equals(label, pane.Title, StringComparison.Ordinal))
         {
             label += "  ·  " + pane.Title;
         }
+
+        return label;
+    }
+
+    private Border? BuildBadge(PaneInfo pane, Brush background, Brush foreground)
+    {
+        string label = BuildLabel(pane);
+        if (label.Length == 0) return null;
 
         var text = new TextBlock
         {
