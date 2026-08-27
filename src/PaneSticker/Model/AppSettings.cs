@@ -51,7 +51,7 @@ public sealed class AppSettings : INotifyPropertyChanged
     private bool _hotkeysEnabled = true;
 
     // ---- 색상 (#AARRGGBB / #RRGGBB) ---------------------------------------
-    private string _accentColor = "#FF2D6FF7";
+    private string _accentColor = "#FF4A5568";
     private string _focusColor = "#FFFF9F1C";
     private string _textColor = "#FFFFFFFF";
 

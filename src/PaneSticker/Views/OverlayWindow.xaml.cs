@@ -241,7 +241,7 @@ public partial class OverlayWindow : Window
         Root.Children.Clear();
         var origin = snap.WindowBounds;
 
-        Color accentColor = ParseColor(_settings.AccentColor, Color.FromRgb(0x2D, 0x6F, 0xF7));
+        Color accentColor = ParseColor(_settings.AccentColor, Color.FromRgb(0x4A, 0x55, 0x68));
         Color focusColor = ParseColor(_settings.FocusColor, Color.FromRgb(0xFF, 0x9F, 0x1C));
         Color preferredText = ParseColor(_settings.TextColor, Colors.White);
 
