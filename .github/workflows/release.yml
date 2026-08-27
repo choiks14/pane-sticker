@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Publish self-contained single file
+        run: >
+          dotnet publish src/PaneSticker -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:EnableCompressionInSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=none
+          -o dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PaneSticker
+          path: dist/PaneSticker.exe
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/PaneSticker.exe
+          generate_release_notes: true

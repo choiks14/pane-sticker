@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>PaneSticker</AssemblyName>
+    <RootNamespace>PaneSticker</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- DPI 인식은 Interop/DpiBootstrap.cs 에서 코드로 설정한다. WinForms 분석기 경고는 해당 없음 -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+
+    <ApplicationIcon>assets/app.ico</ApplicationIcon>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Product>PaneSticker</Product>
+    <AssemblyTitle>PaneSticker</AssemblyTitle>
+    <Description>Windows Terminal 패인 구역을 실시간으로 표시하는 반투명 오버레이</Description>
+  </PropertyGroup>
+
+</Project>

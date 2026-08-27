@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="PaneSticker.app" />
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+
+  <!--
+    DPI 인식은 여기서 선언하지 않는다.
+    매니페스트로 선언하면 프로세스 awareness 가 잠겨 SetProcessDpiAwarenessContext 가
+    ERROR_ACCESS_DENIED 로 거부되고, 실제로는 System-aware(96 DPI) 로 고정돼
+    고배율 모니터에서 GetWindowRect(가상화 좌표)와 UI Automation(물리 좌표)이 어긋난다.
+    대신 Interop/DpiBootstrap.cs 의 [ModuleInitializer] 에서 PerMonitorV2 로 설정한다.
+  -->
+</assembly>

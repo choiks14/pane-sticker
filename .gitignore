@@ -1,0 +1,17 @@
+# Build output
+bin/
+obj/
+dist/
+*.user
+*.suo
+
+# Rider / VS
+.vs/
+.idea/
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Local tooling state
+.bkit/
