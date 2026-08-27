@@ -248,9 +248,16 @@ public partial class OverlayWindow : Window
         var accent = Frozen(accentColor);
         var focus = Frozen(focusColor);
 
-        // 배지 배경이 밝으면(주황 등) 흰 글씨는 대비가 2:1 수준까지 떨어져 읽기 힘들다.
+        // 비활성 배지는 테두리와 같은 회색을 그대로 쓰면 어두운 터미널 위에서 글씨가 묻힌다.
+        // 테두리는 원래 색으로 두고 배지 배경만 어둡게 깔아 글자 대비를 확보한다.
+        // 활성 배지는 눈에 띄어야 하므로 원색을 유지한다.
+        Color accentBadgeColor = Darken(accentColor, 0.55);
+        var accentBadge = Frozen(accentBadgeColor);
+        var focusBadge = focus;
+
+        // 배경이 밝으면(주황 등) 흰 글씨는 대비가 2:1 수준까지 떨어져 읽기 힘들다.
         // 배경마다 대비가 더 좋은 글자색을 고른다.
-        var accentText = PickForeground(accentColor, preferredText);
+        var accentText = PickForeground(accentBadgeColor, preferredText);
         var focusText = PickForeground(focusColor, preferredText);
 
         foreach (var pane in snap.Panes)
@@ -284,7 +291,9 @@ public partial class OverlayWindow : Window
 
             if (!_settings.ShowBadges) continue;
 
-            var badge = BuildBadge(pane, color, pane.Focused ? focusText : accentText);
+            var badge = BuildBadge(pane,
+                pane.Focused ? focusBadge : accentBadge,
+                pane.Focused ? focusText : accentText);
             if (badge == null) continue;   // 표기할 폴더가 없으면 테두리만 그린다
 
             double m = _settings.BadgeMargin;
@@ -437,6 +446,13 @@ public partial class OverlayWindow : Window
             }
         }
         return Frozen(chosen);
+    }
+
+    /// <summary>색을 검정 쪽으로 amount(0~1)만큼 당긴다. 알파는 유지.</summary>
+    private static Color Darken(Color c, double amount)
+    {
+        double k = Math.Clamp(1 - amount, 0, 1);
+        return Color.FromArgb(c.A, (byte)(c.R * k), (byte)(c.G * k), (byte)(c.B * k));
     }
 
     /// <summary>밝은 배경(주황 등)에 쓰는 어두운 글자색.</summary>
