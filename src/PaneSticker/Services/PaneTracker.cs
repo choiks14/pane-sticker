@@ -29,6 +29,13 @@ public sealed class PaneTracker : IDisposable
     private static readonly Dictionary<string, string> EmptyFolderMap = new();
 
     private readonly ShellProcessScanner _shells = new();
+
+    /// <summary>
+    /// 창+패인 번호별로 마지막에 성공한 폴더. 스캔이 순간적으로 실패해도(제목 교체 타이밍 등)
+    /// 배지가 비었다 다시 차오르며 깜빡이지 않게 직전 값을 유지한다.
+    /// </summary>
+    private readonly Dictionary<string, string> _stickyFolder = new(StringComparer.Ordinal);
+
     private IntPtr _lastTerminal = IntPtr.Zero;
     private volatile int _pollIntervalMs = 350;
     private string _lastSignature = "";
@@ -217,11 +224,11 @@ public sealed class PaneTracker : IDisposable
             return result;
         }
 
-        // 폴더 이름을 알아내려면 TextPattern 으로 화면 텍스트를 읽어야 하므로 Full 모드가 필요하다.
+        // 폴더는 프로세스 트리에서 얻으므로 화면 텍스트를 읽을 필요가 없다. 가벼운 캐시 모드로 둔다.
         var cache = new CacheRequest
         {
             TreeScope = TreeScope.Element,
-            AutomationElementMode = resolveFolders ? AutomationElementMode.Full : AutomationElementMode.None
+            AutomationElementMode = AutomationElementMode.None
         };
         cache.Add(AutomationElement.BoundingRectangleProperty);
         cache.Add(AutomationElement.NameProperty);
@@ -229,7 +236,6 @@ public sealed class PaneTracker : IDisposable
         cache.Add(AutomationElement.HelpTextProperty);
         cache.Add(AutomationElement.HasKeyboardFocusProperty);
         cache.Add(AutomationElement.IsOffscreenProperty);
-        if (resolveFolders) cache.Add(TextPattern.Pattern);
 
         var raw = new List<AutomationElement>();
         try
@@ -280,7 +286,7 @@ public sealed class PaneTracker : IDisposable
                 if (string.IsNullOrWhiteSpace(title))
                     title = el.GetCachedPropertyValue(AutomationElement.NameProperty) as string ?? "";
                 focused = el.GetCachedPropertyValue(AutomationElement.HasKeyboardFocusProperty) is true;
-                if (resolveFolders) folder = ResolveFolder(el, title, folderByTitle);
+                if (resolveFolders) folder = ResolveFolder(title, folderByTitle);
             }
             catch
             {
@@ -317,12 +323,20 @@ public sealed class PaneTracker : IDisposable
         for (int i = 0; i < deduped.Count; i++)
         {
             var c = deduped[i];
+            int index = i + 1;
+
+            // 이번 스캔에서 못 찾았으면 직전 값을 그대로 쓴다. 표시가 잠깐 비었다 돌아오지 않게.
+            string key = hwnd.ToString() + ":" + index;
+            string folder = c.Folder;
+            if (folder.Length == 0) _stickyFolder.TryGetValue(key, out folder!);
+            else _stickyFolder[key] = folder;
+
             result.Add(new PaneInfo
             {
-                Index = i + 1,
+                Index = index,
                 Bounds = c.Rect,
                 Title = Shorten(c.Title),
-                Folder = c.Folder,
+                Folder = folder ?? "",
                 Focused = c.Focused
             });
         }
@@ -340,110 +354,26 @@ public sealed class PaneTracker : IDisposable
         }
     }
 
-    // 프롬프트에서 현재 경로를 뽑는 패턴들.
-    //  - PowerShell:  "PS D:\workspace\sticker>"
-    //  - cmd:         "D:\workspace\sticker>"
-    private static readonly Regex WindowsPrompt = new(
-        @"(?m)^\s*(?:PS\s+)?([A-Za-z]:\\[^>\r\n]*?)\s*>", RegexOptions.Compiled);
-
-    //  - Git Bash / MSYS / WSL:  "/d/workspace/sticker$"  "~/proj#"
-    private static readonly Regex PosixPrompt = new(
-        @"(?m)(~?/[^\s""'<>|:*?$#\r\n]+)\s*[$#]", RegexOptions.Compiled);
-
-    // 텍스트 안에 끼어 있는 절대 경로 (Windows "D:\..." 와 MSYS/WSL "/d/...")
-    private static readonly Regex AnyAbsolutePath = new(
-        @"[A-Za-z]:\\[^\s""'<>|*?\r\n]+|/[A-Za-z]/[^\s""'<>|*?:\r\n]+", RegexOptions.Compiled);
-
     /// <summary>
-    /// 패인의 작업 폴더 이름을 추정한다. WT 가 패인별 작업 디렉터리를 노출하지 않으므로
-    /// 화면에 보이는 프롬프트 -> 제목에 포함된 경로 순으로 찾고, 없으면 빈 문자열을 돌려준다.
+    /// 패인의 작업 폴더를 돌려준다.
+    ///
+    /// 셸 프로세스 트리에서 얻은 값만 쓴다. 화면 텍스트에서 경로를 긁는 폴백은 두지 않는다.
+    /// 화면에 보이는 경로는 명령 출력에 따라 수시로 달라져서, 작업 중에 표시가 계속 흔들리기 때문이다.
+    /// 제목이 방금 바뀌어 표에서 못 찾은 경우에만 한 번 강제로 다시 스캔한다.
     /// </summary>
-    private static string ResolveFolder(AutomationElement el, string title,
-                                        IReadOnlyDictionary<string, string> folderByTitle)
+    private string ResolveFolder(string title, IReadOnlyDictionary<string, string> folderByTitle)
     {
-        // 0) 셸 프로세스에서 직접 얻은 작업 폴더. 콘솔 제목으로 패인과 정확히 매칭된다.
-        if (!string.IsNullOrWhiteSpace(title) &&
-            folderByTitle.TryGetValue(title, out var exact) &&
-            !string.IsNullOrWhiteSpace(exact))
-        {
-            return exact;
-        }
+        if (string.IsNullOrWhiteSpace(title)) return "";
 
-        string text = "";
-        try
-        {
-            if (el.GetCachedPattern(TextPattern.Pattern) is TextPattern tp)
-            {
-                var sb = new StringBuilder();
-                foreach (var range in tp.GetVisibleRanges())
-                    sb.Append(range.GetText(-1));
-                text = sb.ToString();
-            }
-        }
-        catch { /* 패턴 미지원/타이밍 문제는 그냥 다음 단계로 */ }
+        if (folderByTitle.TryGetValue(title, out var found) && !string.IsNullOrWhiteSpace(found))
+            return found;
 
-        if (text.Length > 0)
-        {
-            // 1) 셸 프롬프트 - 가장 정확하다.
-            var m = WindowsPrompt.Matches(text);
-            if (m.Count > 0) return Normalize(m[^1].Groups[1].Value);
-
-            var p = PosixPrompt.Matches(text);
-            if (p.Count > 0) return Normalize(p[^1].Groups[1].Value);
-
-            // 2) 프롬프트가 안 보이는 경우(대체 화면 버퍼를 쓰는 TUI 등):
-            //    화면에 보이는 절대 경로 중 가장 자주 등장하는 디렉터리를 작업 폴더로 추정한다.
-            string guess = MostCommonDirectory(text);
-            if (guess.Length > 0) return guess;
-        }
-
-        // 3) 제목에 경로가 들어 있는 경우 (셸이 타이틀을 cwd 로 설정한 환경)
-        if (!string.IsNullOrWhiteSpace(title))
-        {
-            var m = AnyAbsolutePath.Match(title);
-            if (m.Success) return StripFileName(Normalize(m.Value));
-        }
+        // 제목이 막 바뀌었을 수 있다. 캐시를 무시하고 한 번 더 찾아본다.
+        var fresh = _shells.GetMap(force: true);
+        if (fresh.TryGetValue(title, out var refreshed) && !string.IsNullOrWhiteSpace(refreshed))
+            return refreshed;
 
         return "";
-    }
-
-    /// <summary>화면 텍스트에서 가장 자주 등장하는 절대 디렉터리 경로를 고른다.</summary>
-    private static string MostCommonDirectory(string text)
-    {
-        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in AnyAbsolutePath.Matches(text))
-        {
-            string p = StripFileName(Normalize(m.Value));
-            if (p.Length < 5) continue;
-            counts[p] = counts.TryGetValue(p, out int c) ? c + 1 : 1;
-        }
-        if (counts.Count == 0) return "";
-
-        // 동률이면 더 구체적인(긴) 경로를 택한다.
-        return counts.OrderByDescending(kv => kv.Value)
-                     .ThenByDescending(kv => kv.Key.Length)
-                     .First().Key;
-    }
-
-    /// <summary>마지막 구간이 파일 이름처럼 보이면 떼어내 디렉터리만 남긴다.</summary>
-    private static string StripFileName(string path)
-    {
-        int cut = path.LastIndexOfAny(new[] { '\\', '/' });
-        if (cut <= 0 || cut >= path.Length - 1) return path;
-
-        string last = path[(cut + 1)..];
-        int dot = last.LastIndexOf('.');
-        bool looksLikeFile = dot > 0 && dot < last.Length - 1 && last.Length - dot - 1 <= 6;
-        return looksLikeFile ? path[..cut] : path;
-    }
-
-    /// <summary>경로 문자열 정리. 끝의 구분자와 문장부호만 떼고 경로 전체를 유지한다.</summary>
-    private static string Normalize(string path)
-    {
-        if (string.IsNullOrWhiteSpace(path)) return "";
-        path = path.Trim().TrimEnd('.', ',', ')', ']', '}', '"', '\'', ';', '`');
-        if (path.Length > 3) path = path.TrimEnd('\\', '/');
-        return path;
     }
 
     private static string Shorten(string s)

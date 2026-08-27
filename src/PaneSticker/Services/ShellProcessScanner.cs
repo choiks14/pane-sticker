@@ -20,6 +20,9 @@ public sealed class ShellProcessScanner
 {
     private const int RefreshMs = 3000;
 
+    /// <summary>강제 갱신 최소 간격. 제목이 바뀐 직후 즉시 다시 찾되 과도한 스캔은 막는다.</summary>
+    private const int ForcedMinIntervalMs = 400;
+
     private static readonly HashSet<string> ShellNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "powershell.exe", "pwsh.exe", "cmd.exe", "bash.exe", "wsl.exe", "nu.exe", "zsh.exe", "fish.exe"
@@ -29,13 +32,17 @@ public sealed class ShellProcessScanner
     private Dictionary<string, string> _byTitle = new(StringComparer.Ordinal);
     private long _lastRefresh = -RefreshMs * 2L;
 
-    /// <summary>콘솔 제목 -> 작업 폴더. 최대 RefreshMs 주기로만 실제 스캔한다.</summary>
-    public IReadOnlyDictionary<string, string> GetMap()
+    /// <summary>
+    /// 콘솔 제목 -> 작업 폴더. 평소에는 RefreshMs 주기로만 스캔한다.
+    /// force 는 제목이 방금 바뀌어 표에서 못 찾았을 때 쓰며, 이때도 ForcedMinIntervalMs 로 제한한다.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> GetMap(bool force = false)
     {
         lock (_lock)
         {
             long now = Environment.TickCount64;
-            if (now - _lastRefresh >= RefreshMs)
+            long interval = force ? ForcedMinIntervalMs : RefreshMs;
+            if (now - _lastRefresh >= interval)
             {
                 _lastRefresh = now;
                 try { _byTitle = Scan(); }
