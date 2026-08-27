@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -10,31 +10,31 @@ namespace PaneSticker.Model;
 
 public enum BadgeAnchor { TopLeft, TopCenter, TopRight, BottomLeft, BottomRight }
 
-/// <summary>배지에 무엇을 쓸지.</summary>
+/// <summary>諛곗???臾댁뾿???몄?.</summary>
 public enum BadgeLabelMode
 {
-    /// <summary>작업 폴더 전체 경로. 알아내지 못하면 배지를 표시하지 않는다.</summary>
+    /// <summary>?묒뾽 ?대뜑 ?꾩껜 寃쎈줈. ?뚯븘?댁? 紐삵븯硫?諛곗?瑜??쒖떆?섏? ?딅뒗??</summary>
     FolderPath,
-    /// <summary>작업 폴더 이름(마지막 구간)만. 알아내지 못하면 배지를 표시하지 않는다.</summary>
+    /// <summary>?묒뾽 ?대뜑 ?대쫫(留덉?留?援ш컙)留? ?뚯븘?댁? 紐삵븯硫?諛곗?瑜??쒖떆?섏? ?딅뒗??</summary>
     FolderName,
-    /// <summary>패인 제목.</summary>
+    /// <summary>?⑥씤 ?쒕ぉ.</summary>
     Title,
-    /// <summary>패인 번호(1, 2, 3...).</summary>
+    /// <summary>?⑥씤 踰덊샇(1, 2, 3...).</summary>
     Index
 }
 
 public enum VisibilityMode
 {
-    /// <summary>터미널이 활성 창일 때만 표시 (기본값).</summary>
+    /// <summary>?곕??먯씠 ?쒖꽦 李쎌씪 ?뚮쭔 ?쒖떆 (湲곕낯媛?.</summary>
     TerminalFocused,
-    /// <summary>터미널 창이 보이면 항상 표시.</summary>
+    /// <summary>?곕???李쎌씠 蹂댁씠硫???긽 ?쒖떆.</summary>
     TerminalVisible
 }
 
 public sealed class AppSettings : INotifyPropertyChanged
 {
-    // ---- 표시 -------------------------------------------------------------
-    private double _opacity = 0.85;
+    // ---- ?쒖떆 -------------------------------------------------------------
+    private double _opacity = 0.95;
     private bool _showBadges = true;
     private bool _showBorders = true;
     private bool _showTitle;
@@ -45,17 +45,17 @@ public sealed class AppSettings : INotifyPropertyChanged
     private double _badgeMargin = 6;
     private double _borderThickness = 1.5;
 
-    // ---- 동작 -------------------------------------------------------------
+    // ---- ?숈옉 -------------------------------------------------------------
     private VisibilityMode _visibility = VisibilityMode.TerminalFocused;
     private int _pollIntervalMs = 350;
     private bool _hotkeysEnabled = true;
 
-    // ---- 색상 (#AARRGGBB / #RRGGBB) ---------------------------------------
+    // ---- ?됱긽 (#AARRGGBB / #RRGGBB) ---------------------------------------
     private string _accentColor = "#FF4A5568";
     private string _focusColor = "#FFFF9F1C";
     private string _textColor = "#FFFFFFFF";
 
-    /// <summary>패인 번호(1-based) -> 사용자 지정 라벨.</summary>
+    /// <summary>?⑥씤 踰덊샇(1-based) -> ?ъ슜??吏???쇰꺼.</summary>
     public Dictionary<string, string> Labels { get; set; } = new();
 
     public double Opacity { get => _opacity; set => Set(ref _opacity, Math.Clamp(value, 0.05, 1.0)); }
@@ -86,7 +86,7 @@ public sealed class AppSettings : INotifyPropertyChanged
         OnPropertyChanged(nameof(Labels));
     }
 
-    // ---- 저장/로드 ---------------------------------------------------------
+    // ---- ???濡쒕뱶 ---------------------------------------------------------
     [JsonIgnore]
     public static string FilePath { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -141,3 +141,4 @@ public sealed class AppSettings : INotifyPropertyChanged
     private void OnPropertyChanged(string? name)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name ?? string.Empty));
 }
+

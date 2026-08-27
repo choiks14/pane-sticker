@@ -248,10 +248,10 @@ public partial class OverlayWindow : Window
         var accent = Frozen(accentColor);
         var focus = Frozen(focusColor);
 
-        // 비활성 배지는 테두리와 같은 회색을 그대로 쓰면 어두운 터미널 위에서 글씨가 묻힌다.
-        // 테두리는 원래 색으로 두고 배지 배경만 어둡게 깔아 글자 대비를 확보한다.
-        // 활성 배지는 눈에 띄어야 하므로 원색을 유지한다.
-        Color accentBadgeColor = Darken(accentColor, 0.55);
+        // 비활성 배지는 어두운 터미널 위에 올라간다. 배경을 어둡게 깔면 배지 자체가 묻히므로
+        // 반대로 밝게 깔고 글자를 검정으로 둔다(밝은 칩 + 어두운 글씨). 테두리는 원래 색 유지.
+        // 활성 배지는 주황 원색이라 그대로 두어도 잘 보인다.
+        Color accentBadgeColor = Lighten(accentColor, 0.68);
         var accentBadge = Frozen(accentBadgeColor);
         var focusBadge = focus;
 
@@ -448,11 +448,14 @@ public partial class OverlayWindow : Window
         return Frozen(chosen);
     }
 
-    /// <summary>색을 검정 쪽으로 amount(0~1)만큼 당긴다. 알파는 유지.</summary>
-    private static Color Darken(Color c, double amount)
+    /// <summary>색을 흰색 쪽으로 amount(0~1)만큼 당긴다. 알파는 유지.</summary>
+    private static Color Lighten(Color c, double amount)
     {
-        double k = Math.Clamp(1 - amount, 0, 1);
-        return Color.FromArgb(c.A, (byte)(c.R * k), (byte)(c.G * k), (byte)(c.B * k));
+        double k = Math.Clamp(amount, 0, 1);
+        return Color.FromArgb(c.A,
+            (byte)(c.R + (255 - c.R) * k),
+            (byte)(c.G + (255 - c.G) * k),
+            (byte)(c.B + (255 - c.B) * k));
     }
 
     /// <summary>밝은 배경(주황 등)에 쓰는 어두운 글자색.</summary>
