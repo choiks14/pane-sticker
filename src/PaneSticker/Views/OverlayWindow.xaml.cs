@@ -71,7 +71,6 @@ public partial class OverlayWindow : Window
         bool visible = _settings.Enabled
                        && snap.HasTarget
                        && !snap.IsMinimized
-                       && snap.Panes.Count > 0
                        && (_settings.Visibility == VisibilityMode.TerminalVisible || snap.IsForeground);
 
         if (!visible)
@@ -98,6 +97,10 @@ public partial class OverlayWindow : Window
         }
 
         if (Math.Abs(Opacity - _settings.Opacity) > 0.001) Opacity = _settings.Opacity;
+
+        // UIA 스캔이 순간적으로 패인을 하나도 못 찾는 일이 있다.
+        // 이때 숨겼다 다시 켜면 그게 곧 깜빡임이므로, 직전 화면을 그대로 둔다.
+        if (snap.Panes.Count == 0) return;
 
         // 화면에 실제로 그려질 내용만으로 서명을 만든다.
         // 패인 제목은 폴더를 찾는 데만 쓰이고 자주 바뀌므로, 표시 내용이 같으면 다시 그리지 않는다.
@@ -370,15 +373,9 @@ public partial class OverlayWindow : Window
             CornerRadius = new CornerRadius(4),
             Padding = new Thickness(8, 2, 8, 3),
             Child = text,
-            IsHitTestVisible = false,
-            Effect = new DropShadowEffect
-            {
-                BlurRadius = 6,
-                ShadowDepth = 1,
-                Direction = 270,
-                Opacity = 0.45,
-                Color = Colors.Black
-            }
+            IsHitTestVisible = false
+            // 그림자(DropShadowEffect)는 넣지 않는다. 레이어드 창에서 비트맵 효과는
+            // 소프트웨어 렌더링을 유발해 재그리기가 무거워지고 깜빡임의 원인이 된다.
         };
     }
 

@@ -89,7 +89,8 @@ public partial class App : Application
             _terminalPid = pid;
         }
 
-        Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() =>
+        // Render 우선순위로 자주 던지면 실제 화면 그리기를 밀어내 깜빡임처럼 보인다.
+        Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
         {
             _overlay.ApplySnapshot(snap);
             _settingsWindow?.UpdateStatus(snap);
