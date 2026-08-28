@@ -18,14 +18,37 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
+      # 태그(v1.2.3)에서 버전을 뽑아 빌드에 넘긴다.
+      # 이걸 안 하면 exe 속성의 파일 버전이 csproj 기본값에 고정된다.
+      - name: Resolve version from tag
+        id: ver
+        shell: bash
+        run: |
+          ref="${GITHUB_REF_NAME}"
+          if [[ "$ref" == v* ]]; then
+            echo "value=${ref#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=0.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish self-contained single file
         run: >
           dotnet publish src/PaneSticker -c Release -r win-x64 --self-contained true
+          -p:Version=${{ steps.ver.outputs.value }}
           -p:PublishSingleFile=true
           -p:EnableCompressionInSingleFile=true
           -p:IncludeNativeLibrariesForSelfExtract=true
           -p:DebugType=none
           -o dist
+
+      - name: Verify embedded version
+        shell: pwsh
+        run: |
+          $v = (Get-Item dist/PaneSticker.exe).VersionInfo.FileVersion
+          Write-Host "FileVersion = $v"
+          if (-not $v.StartsWith('${{ steps.ver.outputs.value }}')) {
+            throw "버전 불일치: 태그 ${{ steps.ver.outputs.value }} / exe $v"
+          }
 
       - uses: actions/upload-artifact@v4
         with:

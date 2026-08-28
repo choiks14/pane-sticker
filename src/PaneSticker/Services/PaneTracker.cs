@@ -96,8 +96,34 @@ public sealed class PaneTracker : IDisposable
                 Debug.WriteLine("[PaneSticker] capture failed: " + ex.Message);
             }
 
+            MaybeTrimMemory();
             _wake.WaitOne(_pollIntervalMs);
         }
+    }
+
+    private long _lastTrim = Environment.TickCount64;
+
+    /// <summary>
+    /// UIA 요소는 COM RCW 라서 파이널라이저가 돌아야 실제로 해제된다.
+    /// 스캔을 쉬지 않고 도는 앱이라 그냥 두면 상주 메모리가 수백 MB 로 불어난다.
+    /// 2분마다 한 번 수거하고 워킹셋을 OS 에 돌려준다.
+    /// 더 짧게 잡으면 되돌려준 페이지를 곧바로 다시 읽어들이느라 디스크가 분주해진다.
+    /// </summary>
+    private void MaybeTrimMemory()
+    {
+        long now = Environment.TickCount64;
+        if (now - _lastTrim < 120_000) return;
+        _lastTrim = now;
+
+        try
+        {
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            NativeMethods.SetProcessWorkingSetSize(
+                NativeMethods.GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1));
+        }
+        catch { /* 정리 실패는 무시 */ }
     }
 
     // ------------------------------------------------------------------ scan
@@ -230,12 +256,12 @@ public sealed class PaneTracker : IDisposable
             TreeScope = TreeScope.Element,
             AutomationElementMode = AutomationElementMode.None
         };
+        // Name 은 캐시하지 않는다. WT 의 TermControl 은 Name 에 화면 버퍼 전체를 담기 때문에
+        // 매 스캔마다 패인 수만큼 거대한 문자열을 만들어 메모리를 크게 잡아먹는다.
+        // 패인 제목은 HelpText 로 충분하고, ClassName/IsOffscreen 은 조건식에서만 쓰여 캐시가 필요 없다.
         cache.Add(AutomationElement.BoundingRectangleProperty);
-        cache.Add(AutomationElement.NameProperty);
-        cache.Add(AutomationElement.ClassNameProperty);
         cache.Add(AutomationElement.HelpTextProperty);
         cache.Add(AutomationElement.HasKeyboardFocusProperty);
-        cache.Add(AutomationElement.IsOffscreenProperty);
 
         var raw = new List<AutomationElement>();
         try
@@ -283,8 +309,6 @@ public sealed class PaneTracker : IDisposable
                 b = rb;
                 // WT 는 패인 제목을 HelpText 로 노출한다. Name 은 컨트롤 종류("Windows PowerShell") 라서 덜 유용하다.
                 title = el.GetCachedPropertyValue(AutomationElement.HelpTextProperty) as string ?? "";
-                if (string.IsNullOrWhiteSpace(title))
-                    title = el.GetCachedPropertyValue(AutomationElement.NameProperty) as string ?? "";
                 focused = el.GetCachedPropertyValue(AutomationElement.HasKeyboardFocusProperty) is true;
                 if (resolveFolders) folder = ResolveFolder(title, folderByTitle);
             }

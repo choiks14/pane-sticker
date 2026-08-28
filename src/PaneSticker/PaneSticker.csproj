@@ -17,9 +17,13 @@
     <NoWarn>$(NoWarn);WFO0003</NoWarn>
 
     <ApplicationIcon>assets/app.ico</ApplicationIcon>
+    <!-- 릴리즈 빌드는 태그에서 버전을 받아 -p:Version=x.y.z 로 덮어쓴다. 여기 값은 로컬 기본값. -->
     <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+
+    <!-- 상주 메모리 축소: 워크스테이션 + 비동시 GC, 반환한 VM 을 붙들지 않음 -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <RetainVMGarbageCollection>false</RetainVMGarbageCollection>
     <Product>PaneSticker</Product>
     <AssemblyTitle>PaneSticker</AssemblyTitle>
     <Description>Windows Terminal 패인 구역을 실시간으로 표시하는 반투명 오버레이</Description>
