@@ -262,6 +262,9 @@ public sealed class PaneTracker : IDisposable
         cache.Add(AutomationElement.BoundingRectangleProperty);
         cache.Add(AutomationElement.HelpTextProperty);
         cache.Add(AutomationElement.HasKeyboardFocusProperty);
+        // 패인 고유 식별자. 읽기 순서 번호는 분할/닫기 때마다 바뀌어서 직전 폴더를 엉뚱한 패인에 붙인다.
+        cache.Add(AutomationElement.RuntimeIdProperty);
+        cache.Add(AutomationElement.IsOffscreenProperty);
 
         var raw = new List<AutomationElement>();
         try
@@ -295,13 +298,15 @@ public sealed class PaneTracker : IDisposable
         }
 
         // 유효한 후보만 남긴다: 창 안쪽에 있고 최소 크기 이상
-        var candidates = new List<(Rect Rect, string Title, string Folder, bool Focused)>();
+        var candidates = new List<(Rect Rect, string Title, string Folder, bool Focused, bool Offscreen, string Id)>();
         foreach (var el in raw)
         {
             Rect b;
             string title;
             string folder = "";
             bool focused;
+            bool offscreen;
+            string id;
             try
             {
                 var rectObj = el.GetCachedPropertyValue(AutomationElement.BoundingRectangleProperty);
@@ -310,6 +315,10 @@ public sealed class PaneTracker : IDisposable
                 // WT 는 패인 제목을 HelpText 로 노출한다. Name 은 컨트롤 종류("Windows PowerShell") 라서 덜 유용하다.
                 title = el.GetCachedPropertyValue(AutomationElement.HelpTextProperty) as string ?? "";
                 focused = el.GetCachedPropertyValue(AutomationElement.HasKeyboardFocusProperty) is true;
+                offscreen = el.GetCachedPropertyValue(AutomationElement.IsOffscreenProperty) is true;
+                id = el.GetCachedPropertyValue(AutomationElement.RuntimeIdProperty) is int[] rid && rid.Length > 0
+                    ? string.Join('.', rid)
+                    : "";
                 if (resolveFolders) folder = ResolveFolder(title, folderByTitle);
             }
             catch
@@ -325,14 +334,15 @@ public sealed class PaneTracker : IDisposable
             // 창 밖에 있는(비활성 탭 등) 요소 제외
             if (clipped.Width * clipped.Height < b.Width * b.Height * 0.5) continue;
 
-            candidates.Add((clipped, title, folder, focused));
+            candidates.Add((clipped, title, folder, focused, offscreen, id));
         }
 
-        // 동일 사각형 중복 제거
+        // 동일 사각형 중복 제거. 화면에 실제로 보이는 요소를 먼저 고른다.
+        // 겹친 요소 중 숨은 것(비활성 탭 등)을 집으면 그 패인의 폴더가 보이는 패인에 붙는다.
         var deduped = candidates
             .GroupBy(c => ((int)Math.Round(c.Rect.X), (int)Math.Round(c.Rect.Y),
                            (int)Math.Round(c.Rect.Width), (int)Math.Round(c.Rect.Height)))
-            .Select(g => g.OrderByDescending(x => x.Focused).First())
+            .Select(g => g.OrderBy(x => x.Offscreen).ThenByDescending(x => x.Focused).First())
             .ToList();
 
         // 읽기 순서 정렬(위 -> 아래, 같은 줄이면 왼쪽 -> 오른쪽). Top 은 8px 버킷으로 반올림.
@@ -344,13 +354,18 @@ public sealed class PaneTracker : IDisposable
             return a.Rect.X.CompareTo(b.Rect.X);
         });
 
+        string keyPrefix = hwnd.ToString() + ":";
+        var seenKeys = new HashSet<string>(StringComparer.Ordinal);
+
         for (int i = 0; i < deduped.Count; i++)
         {
             var c = deduped[i];
             int index = i + 1;
 
-            // 이번 스캔에서 못 찾았으면 직전 값을 그대로 쓴다. 표시가 잠깐 비었다 돌아오지 않게.
-            string key = hwnd.ToString() + ":" + index;
+            // 이번 스캔에서 못 찾았으면 이 패인의 직전 값을 쓴다. 표시가 잠깐 비었다 돌아오지 않게.
+            // 키는 패인 고유 RuntimeId. 번호로 잡으면 분할/닫기 뒤 다른 패인의 폴더가 넘어온다.
+            string key = keyPrefix + (c.Id.Length > 0 ? c.Id : "#" + index);
+            seenKeys.Add(key);
             string folder = c.Folder;
             if (folder.Length == 0) _stickyFolder.TryGetValue(key, out folder!);
             else _stickyFolder[key] = folder;
@@ -365,7 +380,24 @@ public sealed class PaneTracker : IDisposable
             });
         }
 
+        // 닫힌 패인의 기억은 버린다. 이 창의 사라진 패인 + 이미 닫힌 다른 WT 창의 패인.
+        foreach (var stale in _stickyFolder.Keys
+                     .Where(k => k.StartsWith(keyPrefix, StringComparison.Ordinal)
+                                 ? !seenKeys.Contains(k)
+                                 : !IsLiveWindowKey(k))
+                     .ToList())
+            _stickyFolder.Remove(stale);
+
         return result;
+    }
+
+    /// <summary>"hwnd:패인키" 형식 키의 창이 아직 살아 있는지.</summary>
+    private static bool IsLiveWindowKey(string key)
+    {
+        int colon = key.IndexOf(':');
+        return colon > 0
+               && long.TryParse(key.AsSpan(0, colon), out long h)
+               && NativeMethods.IsWindow(new IntPtr(h));
     }
 
     private static IEnumerable<AutomationElement> Enumerate(AutomationElementCollection collection)
@@ -387,18 +419,34 @@ public sealed class PaneTracker : IDisposable
     /// </summary>
     private string ResolveFolder(string title, IReadOnlyDictionary<string, string> folderByTitle)
     {
-        if (string.IsNullOrWhiteSpace(title)) return "";
+        title = ShellProcessScanner.NormalizeTitle(title);
+        if (title.Length == 0) return "";
 
         if (folderByTitle.TryGetValue(title, out var found) && !string.IsNullOrWhiteSpace(found))
             return found;
 
         // 제목이 막 바뀌었을 수 있다. 캐시를 무시하고 한 번 더 찾아본다.
+        // 단, 강제 스캔으로도 못 찾은 제목(겹치는 제목 등)은 정규 주기 전까지 다시 강제하지 않는다.
+        // 그러지 않으면 400ms 마다 모든 셸에 콘솔 attach 를 되풀이하게 된다.
+        long now = Environment.TickCount64;
+        if (_forcedMiss.TryGetValue(title, out long missAt) && now - missAt < 3000) return "";
+
         var fresh = _shells.GetMap(force: true);
         if (fresh.TryGetValue(title, out var refreshed) && !string.IsNullOrWhiteSpace(refreshed))
+        {
+            _forcedMiss.Remove(title);
             return refreshed;
+        }
 
+        _forcedMiss[title] = now;
+        if (_forcedMiss.Count > 64)
+            foreach (var old in _forcedMiss.Where(kv => now - kv.Value >= 3000).Select(kv => kv.Key).ToList())
+                _forcedMiss.Remove(old);
         return "";
     }
+
+    /// <summary>강제 스캔으로도 못 찾은 제목 -> 그 시각. 트래커 스레드 전용.</summary>
+    private readonly Dictionary<string, long> _forcedMiss = new(StringComparer.Ordinal);
 
     private static string Shorten(string s)
     {
