@@ -61,7 +61,7 @@ fallback.
 Requires the .NET 9 SDK on Windows.
 
 ```powershell
-git clone https://github.com/choiks14/pane-sticker.git
+git clone https://github.com/mintsoft-opensource/pane-sticker.git
 cd pane-sticker
 dotnet publish src/PaneSticker -c Release -r win-x64 --self-contained true `
   -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true `
