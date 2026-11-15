@@ -8,6 +8,33 @@ using System.Text.RegularExpressions;
 
 namespace PaneSticker.Services;
 
+/// <summary>제목이 겹치는 셸 하나. 커서 줄(정규화)로 패인과 짝을 맞춘다.</summary>
+public readonly record struct ShellCandidate(string CursorLine, string Folder);
+
+/// <summary>한 번 스캔한 결과.</summary>
+public sealed class ShellMap
+{
+    public static readonly ShellMap Empty = new(
+        new Dictionary<string, string>(StringComparer.Ordinal),
+        new Dictionary<string, List<ShellCandidate>>(StringComparer.Ordinal), 0);
+
+    public ShellMap(Dictionary<string, string> byTitle, Dictionary<string, List<ShellCandidate>> ambiguous, long stamp)
+    {
+        ByTitle = byTitle;
+        Ambiguous = ambiguous;
+        Stamp = stamp;
+    }
+
+    /// <summary>제목이 하나뿐이라(또는 겹쳐도 폴더가 같아) 바로 정해지는 것.</summary>
+    public IReadOnlyDictionary<string, string> ByTitle { get; }
+
+    /// <summary>제목이 겹치고 폴더가 서로 다른 셸들. 패인 커서 줄로 가려야 한다.</summary>
+    public IReadOnlyDictionary<string, List<ShellCandidate>> Ambiguous { get; }
+
+    /// <summary>스캔 시각. 강제 스캔이 실제로 돌았는지 비교하는 데 쓴다.</summary>
+    public long Stamp { get; }
+}
+
 /// <summary>
 /// Windows Terminal 각 패인의 셸 프로세스를 찾아 "콘솔 제목 -> 작업 폴더" 표를 만든다.
 ///
@@ -15,12 +42,14 @@ namespace PaneSticker.Services;
 ///  1) 패인의 셸(powershell 등)은 WindowsTerminal.exe 의 직계 자식이고,
 ///     AttachConsole + GetConsoleTitle 로 그 패인의 콘솔 제목을 읽을 수 있다.
 ///     이 제목은 UIA 가 TermControl.HelpText 로 노출하는 패인 제목과 같다.
+///     제목이 겹치면 셸 콘솔의 커서 줄과 UIA 패인의 커서 줄을 맞춰 본다.
 ///  2) 실제 작업 폴더는 셸 자신이 아니라 셸에서 가장 가까운 자손 프로세스(claude -> node 등)의 CWD 에 있다.
 ///     PowerShell 은 Set-Location 을 해도 프로세스 CWD 를 바꾸지 않기 때문이다.
 /// </summary>
 public sealed class ShellProcessScanner
 {
-    private const int RefreshMs = 3000;
+    // cd 반영 지연이 곧 이 주기다. 셸 수만큼 콘솔 attach 가 일어나므로 너무 짧게 잡지 않는다.
+    private const int RefreshMs = 1500;
 
     /// <summary>강제 갱신 최소 간격. 제목이 바뀐 직후 즉시 다시 찾되 과도한 스캔은 막는다.</summary>
     private const int ForcedMinIntervalMs = 400;
@@ -40,7 +69,7 @@ public sealed class ShellProcessScanner
     };
 
     private readonly object _lock = new();
-    private Dictionary<string, string> _byTitle = new(StringComparer.Ordinal);
+    private ShellMap _map = ShellMap.Empty;
     private long _lastRefresh = -RefreshMs * 2L;
 
     /// <summary>
@@ -53,7 +82,7 @@ public sealed class ShellProcessScanner
     /// 콘솔 제목 -> 작업 폴더. 평소에는 RefreshMs 주기로만 스캔한다.
     /// force 는 제목이 방금 바뀌어 표에서 못 찾았을 때 쓰며, 이때도 ForcedMinIntervalMs 로 제한한다.
     /// </summary>
-    public IReadOnlyDictionary<string, string> GetMap(bool force = false)
+    public ShellMap GetMap(bool force = false)
     {
         lock (_lock)
         {
@@ -62,11 +91,21 @@ public sealed class ShellProcessScanner
             if (now - _lastRefresh >= interval)
             {
                 _lastRefresh = now;
-                try { _byTitle = Scan(); }
+                try { _map = Scan(now); }
                 catch (Exception ex) { Debug.WriteLine("[PaneSticker] shell scan failed: " + ex.Message); }
             }
-            return _byTitle;
+            return _map;
         }
+    }
+
+    /// <summary>커서 줄 비교용 정규화. 공백 차이(줄 끝 채움, 폭 계산 차이)를 무시한다.</summary>
+    public static string NormalizeLine(string line)
+    {
+        if (string.IsNullOrEmpty(line)) return "";
+        var sb = new StringBuilder(line.Length);
+        foreach (char ch in line)
+            if (!char.IsWhiteSpace(ch)) sb.Append(ch);
+        return sb.ToString();
     }
 
     /// <summary>
@@ -82,7 +121,7 @@ public sealed class ShellProcessScanner
         return title[i..].Trim();
     }
 
-    private Dictionary<string, string> Scan()
+    private ShellMap Scan(long stamp)
     {
         var (nameOf, childrenOf) = SnapshotProcesses();
 
@@ -97,8 +136,7 @@ public sealed class ShellProcessScanner
                     shells.Add(kid);
         }
 
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        var ambiguous = new HashSet<string>(StringComparer.Ordinal);
+        var byTitle = new Dictionary<string, List<ShellCandidate>>(StringComparer.Ordinal);
 
         // 사라진 셸의 기억은 버린다(PID 재사용 시 엉뚱한 값이 붙지 않게).
         // 스냅샷이 실패해 셸이 하나도 안 잡힌 경우에는 기억을 지우지 않는다.
@@ -114,7 +152,7 @@ public sealed class ShellProcessScanner
             bool stale = StaleCwdShells.Contains(nameOf[shell]);
 
             // 콘솔에 붙어 있는 구간은 최소로 유지한다. 경로 존재 확인 등은 떼어낸 뒤에 한다.
-            var (rawTitle, rawPrompt, idle) = ReadConsole(shell, readPrompt: stale);
+            var (rawTitle, cursorLine, rawPrompt, idle) = ReadConsole(shell, readPrompt: stale);
             string title = NormalizeTitle(rawTitle);
             if (title.Length == 0) continue;
 
@@ -122,23 +160,31 @@ public sealed class ShellProcessScanner
             string folder = stale
                 ? ResolvePowerShellFolder(shell, childrenOf, prompt, idle)
                 : ResolvePlainShellFolder(shell, childrenOf);
-            if (folder.Length == 0) continue;
 
-            if (result.TryGetValue(title, out var existing))
+            // 폴더를 못 찾은 셸도 남긴다. 빼 버리면 같은 제목의 다른 셸 폴더가 이 패인에도 붙는다.
+            if (!byTitle.TryGetValue(title, out var list))
+                byTitle[title] = list = new List<ShellCandidate>();
+            list.Add(new ShellCandidate(NormalizeLine(cursorLine), folder));
+        }
+
+        // 제목이 하나뿐이거나 겹쳐도 폴더가 같으면 바로 정한다.
+        // 제목이 겹치고 폴더가 다르면(예: 둘 다 "Windows PowerShell") 패인 쪽 커서 줄로 가린다.
+        var unique = new Dictionary<string, string>(StringComparer.Ordinal);
+        var ambiguous = new Dictionary<string, List<ShellCandidate>>(StringComparer.Ordinal);
+        foreach (var (title, list) in byTitle)
+        {
+            int distinct = list.Select(c => c.Folder).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            if (distinct == 1)
             {
-                // 제목이 겹치면(예: 둘 다 "Windows PowerShell") 어느 패인인지 특정할 수 없다.
-                // 잘못된 폴더를 보여주느니 비워 둔다.
-                if (!string.Equals(existing, folder, StringComparison.OrdinalIgnoreCase))
-                    ambiguous.Add(title);
+                if (list[0].Folder.Length > 0) unique[title] = list[0].Folder;
             }
             else
             {
-                result[title] = folder;
+                ambiguous[title] = list;
             }
         }
 
-        foreach (var t in ambiguous) result.Remove(t);
-        return result;
+        return new ShellMap(unique, ambiguous, stamp);
     }
 
     /// <summary>cmd 등: cd 가 프로세스 CWD 를 바꾸므로 셸 자신이 최신 값이다.</summary>
@@ -266,7 +312,7 @@ public sealed class ShellProcessScanner
     /// 프롬프트 경로는 화면 전체가 아니라 커서가 있는 줄(과 줄바꿈된 직전 줄)만 본다.
     /// 그 줄이 "PS D:\path>" 형태일 때만 쓰므로 명령 출력 속 경로에 흔들리지 않는다.
     /// </summary>
-    private static (string Title, string PromptPath, bool Idle) ReadConsole(int pid, bool readPrompt)
+    private static (string Title, string CursorLine, string PromptPath, bool Idle) ReadConsole(int pid, bool readPrompt)
     {
         EnsureCtrlHandler();
 
@@ -274,12 +320,12 @@ public sealed class ShellProcessScanner
         if (!AttachConsole(pid))
         {
             // 이미 다른 콘솔이 붙어 있으면 ACCESS_DENIED. 떼고 한 번만 다시 시도한다.
-            if (Marshal.GetLastWin32Error() != ERROR_ACCESS_DENIED) return ("", "", false);
+            if (Marshal.GetLastWin32Error() != ERROR_ACCESS_DENIED) return ("", "", "", false);
             FreeConsole();
             if (!AttachConsole(pid))
             {
                 Debug.WriteLine("[PaneSticker] AttachConsole failed: " + Marshal.GetLastWin32Error());
-                return ("", "", false);
+                return ("", "", "", false);
             }
         }
         try
@@ -287,13 +333,12 @@ public sealed class ShellProcessScanner
             var sb = new StringBuilder(1024);
             int n = GetConsoleTitleW(sb, sb.Capacity);
             string title = n > 0 ? sb.ToString() : "";
-            if (!readPrompt) return (title, "", false);
-            var (path, idle) = ReadPromptPath();
-            return (title, path, idle);
+            var (line, path, idle) = ReadCursor(readPrompt);
+            return (title, line, path, idle);
         }
         catch
         {
-            return ("", "", false);
+            return ("", "", "", false);
         }
         finally
         {
@@ -329,33 +374,38 @@ public sealed class ShellProcessScanner
         new(@"^\s*(?:PS\s+)?([A-Za-z]:\\[^<>|""*?\r\n]*?)>", RegexOptions.Compiled);
 
     /// <summary>
-    /// 커서 줄(과 줄바꿈된 직전 두 줄)에서 프롬프트 경로를 읽는다. 존재 확인은 하지 않는다(호출부가 detach 후에).
+    /// 커서 줄을 읽는다. 제목이 겹치는 패인을 가릴 때 UIA 쪽 커서 줄과 맞춰 보는 데 쓴다.
+    /// readPrompt 면 커서 줄(과 줄바꿈된 직전 두 줄)에서 프롬프트 경로도 읽는다.
+    /// 존재 확인은 하지 않는다(호출부가 detach 후에).
     /// Idle = 커서 줄 하나만으로 프롬프트가 매칭됨 = 셸이 입력을 기다리는 중.
     /// </summary>
-    private static (string Path, bool Idle) ReadPromptPath()
+    private static (string CursorLine, string Path, bool Idle) ReadCursor(bool readPrompt)
     {
         IntPtr h = CreateFileW("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
             IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-        if (h == IntPtr.Zero || h == new IntPtr(-1)) return ("", false);
+        if (h == IntPtr.Zero || h == new IntPtr(-1)) return ("", "", false);
         try
         {
-            if (!GetConsoleScreenBufferInfo(h, out var info)) return ("", false);
+            if (!GetConsoleScreenBufferInfo(h, out var info)) return ("", "", false);
             int width = info.dwSize.X;
             int cy = info.dwCursorPosition.Y;
-            if (width <= 0 || width > 2000 || cy < 0) return ("", false);
+            if (width <= 0 || width > 2000 || cy < 0) return ("", "", false);
+
+            string cursorLine = ReadLine(h, cy, width);
+            if (!readPrompt) return (cursorLine, "", false);
 
             // 직전 줄은 줄바꿈 이어붙이기용이라 다듬지 않고 원문 그대로 붙인다.
-            string line = "";
+            string line = cursorLine;
             for (int back = 0; back <= 2 && cy - back >= 0; back++)
             {
-                line = ReadLine(h, cy - back, width) + line;
+                if (back > 0) line = ReadLine(h, cy - back, width) + line;
                 var m = PromptPath.Match(line);
                 if (!m.Success) continue;
                 string path = m.Groups[1].Value.TrimEnd('\\', ' ');
                 if (path.Length == 2) path += "\\";   // "C:" -> "C:\"
-                return (path, back == 0);
+                return (cursorLine, path, back == 0);
             }
-            return ("", false);
+            return (cursorLine, "", false);
         }
         finally
         {
