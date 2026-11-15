@@ -225,8 +225,6 @@ public sealed class PaneTracker : IDisposable
     /// </summary>
     private List<PaneInfo> FindPanes(IntPtr hwnd, Rect windowBounds, bool resolveFolders, out string? diagnostic)
     {
-        // 셸 프로세스에서 얻은 "콘솔 제목 -> 작업 폴더" 표. 화면 읽기보다 정확하다.
-
         diagnostic = null;
         var result = new List<PaneInfo>();
 
@@ -296,17 +294,15 @@ public sealed class PaneTracker : IDisposable
         }
 
         // 유효한 후보만 남긴다: 창 안쪽에 있고 최소 크기 이상
-        var candidates = new List<(Rect Rect, string Title, string Folder, bool Focused, bool Offscreen, string Id,
-            List<ShellCandidate>? Ambig)>();
+        var candidates = new List<(Rect Rect, string Title, bool Focused, bool Offscreen, string Id,
+            AutomationElement El)>();
         foreach (var el in raw)
         {
             Rect b;
             string title;
-            string folder = "";
             bool focused;
             bool offscreen;
             string id;
-            List<ShellCandidate>? ambig = null;
             try
             {
                 var rectObj = el.GetCachedPropertyValue(AutomationElement.BoundingRectangleProperty);
@@ -319,7 +315,6 @@ public sealed class PaneTracker : IDisposable
                 id = el.GetCachedPropertyValue(AutomationElement.RuntimeIdProperty) is int[] rid && rid.Length > 0
                     ? string.Join('.', rid)
                     : "";
-                if (resolveFolders) folder = ResolveFolder(title, el, out ambig);
             }
             catch
             {
@@ -334,7 +329,7 @@ public sealed class PaneTracker : IDisposable
             // 창 밖에 있는(비활성 탭 등) 요소 제외
             if (clipped.Width * clipped.Height < b.Width * b.Height * 0.5) continue;
 
-            candidates.Add((clipped, title, folder, focused, offscreen, id, ambig));
+            candidates.Add((clipped, title, focused, offscreen, id, el));
         }
 
         // 동일 사각형 중복 제거. 화면에 실제로 보이는 요소를 먼저 고른다.
@@ -356,28 +351,43 @@ public sealed class PaneTracker : IDisposable
 
         string keyPrefix = hwnd.ToString() + ":";
         var seenKeys = new HashSet<string>(StringComparer.Ordinal);
+        // 셸 표는 이번 패스에서 한 번만 받는다. 도중에 정기 스캔이 끼면 앞뒤 패인이 다른 시점의 표로 정해진다.
+        // 강제 스캔을 돌린 경우에만 ResolveFolder 가 새 표로 바꿔 준다.
+        var map = resolveFolders ? _shells.GetMap() : ShellMap.Empty;
 
         for (int i = 0; i < deduped.Count; i++)
         {
             var c = deduped[i];
             int index = i + 1;
 
-            // 이번 스캔에서 못 찾았으면 이 패인의 직전 값을 쓴다. 표시가 잠깐 비었다 돌아오지 않게.
-            // 키는 패인 고유 RuntimeId. 번호로 잡으면 분할/닫기 뒤 다른 패인의 폴더가 넘어온다.
-            string key = keyPrefix + (c.Id.Length > 0 ? c.Id : "#" + index);
-            seenKeys.Add(key);
-            string folder = c.Folder;
-            if (folder.Length > 0)
+            // 폴더는 필터를 통과한 패인에만 찾는다. 숨은 탭 요소 때문에 강제 스캔이 돌지 않게.
+            string folder = "";
+            List<ShellCandidate>? ambig = null;
+            if (resolveFolders)
             {
-                _stickyFolder[key] = folder;
+                try { folder = ResolveFolder(c.Title, c.El, ref map, out ambig); }
+                catch { folder = ""; ambig = null; }
             }
-            else if (_stickyFolder.TryGetValue(key, out var sticky))
+
+            // 이번 스캔에서 못 찾았으면 이 패인의 직전 값을 쓴다. 표시가 잠깐 비었다 돌아오지 않게.
+            // 키는 패인 고유 RuntimeId 뿐이다. 번호로 잡으면 다른 탭이나 분할 뒤의 다른 패인이 같은 키를 써서
+            // 엉뚱한 폴더가 넘어오므로, RuntimeId 가 없는 패인은 기억하지 않는다.
+            if (c.Id.Length > 0)
             {
-                // 제목이 겹쳐 못 가린 패인은, 기억한 폴더가 지금도 후보 중에 있을 때만 쓴다.
-                // 그렇지 않으면 cd 이전의 낡은 폴더가 계속 붙어 있게 된다.
-                if (c.Ambig == null ||
-                    c.Ambig.Any(a => string.Equals(a.Folder, sticky, StringComparison.OrdinalIgnoreCase)))
-                    folder = sticky;
+                string key = keyPrefix + c.Id;
+                seenKeys.Add(key);
+                if (folder.Length > 0)
+                {
+                    _stickyFolder[key] = folder;
+                }
+                else if (_stickyFolder.TryGetValue(key, out var sticky))
+                {
+                    // 제목이 겹쳐 못 가린 패인은, 기억한 폴더가 지금도 후보 중에 있을 때만 쓴다.
+                    // 그렇지 않으면 cd 이전의 낡은 폴더가 계속 붙어 있게 된다.
+                    if (ambig == null ||
+                        ambig.Any(a => string.Equals(a.Folder, sticky, StringComparison.OrdinalIgnoreCase)))
+                        folder = sticky;
+                }
             }
 
             result.Add(new PaneInfo
@@ -395,8 +405,7 @@ public sealed class PaneTracker : IDisposable
         bool overCap = _stickyFolder.Count > StickyCap;
         foreach (var stale in _stickyFolder.Keys
                      .Where(k => k.StartsWith(keyPrefix, StringComparison.Ordinal)
-                                 // RuntimeId 가 없어 번호로 잡은 키는 탭을 넘나들면 다른 패인을 가리키므로 남기지 않는다.
-                                 ? (overCap || k.Contains(":#", StringComparison.Ordinal)) && !seenKeys.Contains(k)
+                                 ? overCap && !seenKeys.Contains(k)
                                  : !IsLiveWindowKey(k))
                      .ToList())
             _stickyFolder.Remove(stale);
@@ -428,62 +437,63 @@ public sealed class PaneTracker : IDisposable
     ///
     /// 셸 프로세스 트리에서 얻은 값만 쓴다. 화면 텍스트에서 경로를 긁는 폴백은 두지 않는다.
     /// 화면에 보이는 경로는 명령 출력에 따라 수시로 달라져서, 작업 중에 표시가 계속 흔들리기 때문이다.
-    /// 제목이 방금 바뀌어 표에서 못 찾은 경우에만 한 번 강제로 다시 스캔한다.
+    /// 표가 낡아서 못 찾은 경우(제목이 방금 바뀜, 겹치는 제목에서 커서 줄이 어느 후보와도 안 맞음)에만
+    /// 강제로 다시 스캔한다. 새로 받은 표는 map 으로 돌려줘 같은 패스의 다음 패인도 쓰게 한다.
     /// ambig = 제목이 겹친 후보들(겹치지 않았으면 null). 기억한 폴더를 써도 되는지 판단할 때 쓴다.
     /// </summary>
-    private string ResolveFolder(string title, AutomationElement el, out List<ShellCandidate>? ambig)
+    private string ResolveFolder(string title, AutomationElement el, ref ShellMap map, out List<ShellCandidate>? ambig)
     {
         ambig = null;
         title = ShellProcessScanner.NormalizeTitle(title);
         if (title.Length == 0) return "";
 
-        // 매번 최신 표를 받는다. 앞 패인이 강제 스캔을 돌렸으면 그 결과를 같이 쓴다.
-        var map = _shells.GetMap();
-        string found = Lookup(title, map, el, out ambig, out bool known);
-        // 표에 있는 제목이면(못 가렸거나 폴더를 알 수 없어도) 강제 스캔은 소용없다. 정기 스캔을 기다린다.
-        if (found.Length > 0 || known) return found;
-
-        // 제목이 막 바뀌었다. 한 번 더 찾아본다.
-        // 강제 스캔으로도 못 찾은 제목(관리자 탭처럼 콘솔을 못 읽는 셸 등)은 점점 길게 쉰다.
-        // 그러지 않으면 모든 셸에 콘솔 attach 를 끝없이 되풀이하게 된다.
-        // 간격 제한에 걸려 스캔이 실제로 안 돈 경우는 실패로 치지 않는다.
-        long now = Environment.TickCount64;
-        if (_forcedMiss.TryGetValue(title, out var miss) && now - miss.At < miss.Delay) return "";
-
-        var fresh = _shells.GetMap(force: true);
-        found = Lookup(title, fresh, el, out ambig, out known);
-        if (found.Length > 0 || known)
+        string found = Lookup(title, map, el, out ambig, out bool stale);
+        if (!stale)
         {
             _forcedMiss.Remove(title);
             return found;
         }
 
-        if (fresh.Stamp != map.Stamp)
+        // 다시 스캔해도 계속 못 찾는 제목(관리자 탭처럼 콘솔을 못 읽는 셸, 출력이 쉬지 않는 패인 등)은
+        // 정기 스캔 주기만큼 쉰다. 그러지 않으면 모든 셸에 콘솔 attach 를 끝없이 되풀이하게 된다.
+        long now = Environment.TickCount64;
+        if (_forcedMiss.TryGetValue(title, out long at) && now - at < ForcedRetryMs) return found;
+
+        var fresh = _shells.GetMap(force: true);
+        // 간격 제한에 걸려 스캔이 실제로 안 돌았으면 실패로 치지 않는다.
+        if (fresh.Stamp == map.Stamp) return found;
+        map = fresh;
+
+        found = Lookup(title, map, el, out ambig, out stale);
+        if (!stale)
         {
-            long delay = miss.Delay == 0 ? ForcedMissBackoffMs : Math.Min(miss.Delay * 2, ForcedMissBackoffMaxMs);
-            _forcedMiss[title] = (now, delay);
-            if (_forcedMiss.Count > 64)
-                foreach (var old in _forcedMiss.Where(kv => now - kv.Value.At >= ForcedMissBackoffMaxMs)
-                             .Select(kv => kv.Key).ToList())
-                    _forcedMiss.Remove(old);
+            _forcedMiss.Remove(title);
+            return found;
         }
-        return "";
+
+        _forcedMiss[title] = now;
+        if (_forcedMiss.Count > 64)
+            foreach (var old in _forcedMiss.Where(kv => now - kv.Value >= ForcedRetryMs)
+                         .Select(kv => kv.Key).ToList())
+                _forcedMiss.Remove(old);
+        return found;
     }
 
     /// <summary>
     /// 표에서 제목을 찾는다. 제목이 겹치는 경우면 패인 커서 줄을 셸 커서 줄과 맞춰 본다.
-    /// known = 표에 있는 제목(폴더를 정하지 못했더라도).
+    /// stale = 표가 낡아서 못 찾았을 수 있음(다시 스캔하면 찾을 수도 있음).
+    /// 폴더를 알 수 없는 셸이거나 커서 줄이 똑같아 못 가리는 경우는 다시 스캔해도 소용없어서 false.
     /// </summary>
     private static string Lookup(string title, ShellMap map, AutomationElement el,
-        out List<ShellCandidate>? ambig, out bool known)
+        out List<ShellCandidate>? ambig, out bool stale)
     {
         ambig = null;
-        known = true;
+        stale = false;
         if (map.ByTitle.TryGetValue(title, out var folder) && folder.Length > 0) return folder;
         if (map.Unresolved.Contains(title)) return "";
         if (!map.Ambiguous.TryGetValue(title, out var list))
         {
-            known = false;
+            stale = true;
             return "";
         }
 
@@ -496,9 +506,12 @@ public sealed class PaneTracker : IDisposable
         // 맞는 후보들이 모두 같은 폴더일 때만 정한다(예: 둘 다 "❯" 만 보이면 못 가린다).
         string exact = PickFolder(list, c => string.Equals(c.CursorLine, line, StringComparison.Ordinal), out bool any);
         if (any) return exact;
-        return PickFolder(list, c => c.CursorLine.Length >= 3 &&
-                                     (line.StartsWith(c.CursorLine, StringComparison.Ordinal) ||
-                                      c.CursorLine.StartsWith(line, StringComparison.Ordinal)), out _);
+        string prefix = PickFolder(list, c => c.CursorLine.Length >= 3 &&
+                                              (line.StartsWith(c.CursorLine, StringComparison.Ordinal) ||
+                                               c.CursorLine.StartsWith(line, StringComparison.Ordinal)), out any);
+        // 어느 후보와도 안 맞으면 스캔 뒤에 커서 줄이 바뀐 것이다.
+        stale = !any;
+        return prefix;
     }
 
     /// <summary>조건에 맞는 후보들의 폴더가 하나로 모이면 그 폴더. any = 맞는 후보가 있었음.</summary>
@@ -534,12 +547,12 @@ public sealed class PaneTracker : IDisposable
         }
     }
 
-    private const long ForcedMissBackoffMs = 1000;
-    private const long ForcedMissBackoffMaxMs = 16000;
+    /// <summary>강제 스캔으로도 못 찾은 제목을 다시 강제 스캔하기까지 쉬는 시간. 셸 정기 스캔 주기와 같다.</summary>
+    private const long ForcedRetryMs = 1500;
     private const int StickyCap = 256;
 
-    /// <summary>강제 스캔으로도 못 찾은 제목 -> (그 시각, 다음 시도까지 대기). 트래커 스레드 전용.</summary>
-    private readonly Dictionary<string, (long At, long Delay)> _forcedMiss = new(StringComparer.Ordinal);
+    /// <summary>강제 스캔으로도 못 찾은 제목 -> 그 시각. 트래커 스레드 전용.</summary>
+    private readonly Dictionary<string, long> _forcedMiss = new(StringComparer.Ordinal);
 
     private static string Shorten(string s)
     {
