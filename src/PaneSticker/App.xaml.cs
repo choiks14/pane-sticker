@@ -53,6 +53,7 @@ public partial class App : Application
 
         _settings = AppSettings.Load();
         _settings.PropertyChanged += OnSettingsChanged;
+        PaneSticker.Services.AutoStart.RepairPathIfMissing();
 
         _overlay = new OverlayWindow(_settings);
         _overlay.HotKeyPressed += OnHotKey;

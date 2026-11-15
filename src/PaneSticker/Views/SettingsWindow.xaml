@@ -119,6 +119,7 @@
                 </ItemsControl>
 
                 <TextBlock Style="{StaticResource Section}" Text="동작" />
+                <CheckBox x:Name="AutoStartCheck" Content="Windows 로그인 시 자동 실행" />
                 <DockPanel Margin="0,2">
                     <TextBlock DockPanel.Dock="Left" Text="표시 조건" Width="90" />
                     <ComboBox x:Name="VisibilityCombo" DisplayMemberPath="Text" SelectedValuePath="Value" />

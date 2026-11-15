@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using PaneSticker.Model;
+using PaneSticker.Services;
 
 namespace PaneSticker.Views;
 
@@ -104,6 +105,8 @@ public partial class SettingsWindow : Window
         TextColorBox.Text = _settings.TextColor;
         VisibilityCombo.SelectedValue = _settings.Visibility;
         PollSlider.Value = _settings.PollIntervalMs;
+        // 자동 실행은 settings.json 이 아니라 레지스트리가 기준이다(작업 관리자에서 바꾼 것도 반영).
+        AutoStartCheck.IsChecked = AutoStart.IsEnabled();
         RefreshValueLabels();
     }
 
@@ -118,6 +121,16 @@ public partial class SettingsWindow : Window
         ShowBadgesCheck.Click += (_, _) => Apply(() => _settings.ShowBadges = ShowBadgesCheck.IsChecked == true);
         ShowBordersCheck.Click += (_, _) => Apply(() => _settings.ShowBorders = ShowBordersCheck.IsChecked == true);
         ShowTitleCheck.Click += (_, _) => Apply(() => _settings.ShowTitle = ShowTitleCheck.IsChecked == true);
+        AutoStartCheck.Click += (_, _) =>
+        {
+            bool want = AutoStartCheck.IsChecked == true;
+            if (!AutoStart.SetEnabled(want))
+            {
+                AutoStartCheck.IsChecked = AutoStart.IsEnabled();
+                MessageBox.Show(this, "자동 실행 설정을 바꾸지 못했습니다.", "PaneSticker",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        };
 
         LabelModeCombo.SelectionChanged += (_, _) => Apply(() =>
         {
