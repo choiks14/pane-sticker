@@ -16,14 +16,20 @@ public sealed class ShellMap
 {
     public static readonly ShellMap Empty = new(
         new Dictionary<string, string>(StringComparer.Ordinal),
-        new Dictionary<string, List<ShellCandidate>>(StringComparer.Ordinal), 0);
+        new Dictionary<string, List<ShellCandidate>>(StringComparer.Ordinal),
+        new HashSet<string>(StringComparer.Ordinal), 0);
 
-    public ShellMap(Dictionary<string, string> byTitle, Dictionary<string, List<ShellCandidate>> ambiguous, long stamp)
+    public ShellMap(Dictionary<string, string> byTitle, Dictionary<string, List<ShellCandidate>> ambiguous,
+        HashSet<string> unresolved, long stamp)
     {
         ByTitle = byTitle;
         Ambiguous = ambiguous;
+        Unresolved = unresolved;
         Stamp = stamp;
     }
+
+    /// <summary>셸은 찾았지만 폴더를 알 수 없는 제목(ssh·WSL 등). 다시 스캔해도 소용없다.</summary>
+    public IReadOnlySet<string> Unresolved { get; }
 
     /// <summary>제목이 하나뿐이라(또는 겹쳐도 폴더가 같아) 바로 정해지는 것.</summary>
     public IReadOnlyDictionary<string, string> ByTitle { get; }
@@ -171,20 +177,16 @@ public sealed class ShellProcessScanner
         // 제목이 겹치고 폴더가 다르면(예: 둘 다 "Windows PowerShell") 패인 쪽 커서 줄로 가린다.
         var unique = new Dictionary<string, string>(StringComparer.Ordinal);
         var ambiguous = new Dictionary<string, List<ShellCandidate>>(StringComparer.Ordinal);
+        var unresolved = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (title, list) in byTitle)
         {
             int distinct = list.Select(c => c.Folder).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-            if (distinct == 1)
-            {
-                if (list[0].Folder.Length > 0) unique[title] = list[0].Folder;
-            }
-            else
-            {
-                ambiguous[title] = list;
-            }
+            if (distinct > 1) ambiguous[title] = list;
+            else if (list[0].Folder.Length > 0) unique[title] = list[0].Folder;
+            else unresolved.Add(title);
         }
 
-        return new ShellMap(unique, ambiguous, stamp);
+        return new ShellMap(unique, ambiguous, unresolved, stamp);
     }
 
     /// <summary>cmd 등: cd 가 프로세스 CWD 를 바꾸므로 셸 자신이 최신 값이다.</summary>
