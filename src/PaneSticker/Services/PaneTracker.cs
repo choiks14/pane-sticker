@@ -498,39 +498,75 @@ public sealed class PaneTracker : IDisposable
         }
 
         ambig = list;
-        string line = ShellProcessScanner.NormalizeLine(ReadCaretLine(el));
+        string line = ReadCaretText(el, 0);
         if (line.Length == 0) return "";
 
         // 1) 커서 줄이 똑같은 후보. 2) 없으면 한쪽이 다른 쪽의 앞부분인 후보
         //    (스캔 뒤에 프롬프트 뒤로 명령을 치는 중이면 줄이 길어져 있다).
-        // 맞는 후보들이 모두 같은 폴더일 때만 정한다(예: 둘 다 "❯" 만 보이면 못 가린다).
-        string exact = PickFolder(list, c => string.Equals(c.CursorLine, line, StringComparison.Ordinal), out bool any);
-        if (any) return exact;
-        string prefix = PickFolder(list, c => c.CursorLine.Length >= 3 &&
-                                              (line.StartsWith(c.CursorLine, StringComparison.Ordinal) ||
-                                               c.CursorLine.StartsWith(line, StringComparison.Ordinal)), out any);
+        var hits = list.Where(c => string.Equals(c.CursorLine, line, StringComparison.Ordinal)).ToList();
+        if (hits.Count == 0)
+            hits = list.Where(c => c.CursorLine.Length >= 3 &&
+                                   (line.StartsWith(c.CursorLine, StringComparison.Ordinal) ||
+                                    c.CursorLine.StartsWith(line, StringComparison.Ordinal))).ToList();
         // 어느 후보와도 안 맞으면 스캔 뒤에 커서 줄이 바뀐 것이다.
-        stale = !any;
-        return prefix;
-    }
-
-    /// <summary>조건에 맞는 후보들의 폴더가 하나로 모이면 그 폴더. any = 맞는 후보가 있었음.</summary>
-    private static string PickFolder(List<ShellCandidate> list, Func<ShellCandidate, bool> match, out bool any)
-    {
-        any = false;
-        string hit = "";
-        foreach (var c in list)
+        if (hits.Count == 0)
         {
-            if (!match(c)) continue;
-            if (c.Folder.Length == 0) { any = true; return ""; }
-            if (!any) { any = true; hit = c.Folder; }
-            else if (!string.Equals(hit, c.Folder, StringComparison.OrdinalIgnoreCase)) return "";
+            stale = true;
+            return "";
         }
-        return hit;
+
+        // 맞는 후보들이 모두 같은 폴더면 바로 정한다.
+        string first = hits[0].Folder;
+        if (first.Length > 0 && hits.All(c => string.Equals(c.Folder, first, StringComparison.OrdinalIgnoreCase)))
+            return first;
+
+        // 커서 줄까지 같다(예: Claude·Codex 입력창이 둘 다 "❯"). 커서 위 몇 줄까지 이어서 비교한다.
+        return PickByContext(hits, el);
     }
 
-    /// <summary>패인의 커서가 있는 줄. 선택 영역이 있으면 그 시작 줄이 나와 매칭이 안 될 뿐 해는 없다.</summary>
-    private static string ReadCaretLine(AutomationElement el)
+    /// <summary>
+    /// 커서 줄과 그 위 몇 줄을 이어 붙인 문자열을 뒤에서부터 비교해, 가장 길게 일치하는 후보의 폴더를 고른다.
+    /// 2등과 차이가 충분할 때만 정한다. 비슷하면 잘못 붙이느니 비워 둔다.
+    /// </summary>
+    private static string PickByContext(List<ShellCandidate> hits, AutomationElement el)
+    {
+        string ctx = ReadCaretText(el, ShellProcessScanner.ContextLines);
+        if (ctx.Length == 0) return "";
+
+        int best = -1, second = -1;
+        string bestFolder = "";
+        foreach (var c in hits)
+        {
+            int n = CommonSuffixLength(ctx, c.Context);
+            if (n > best)
+            {
+                second = best;
+                best = n;
+                bestFolder = c.Folder;
+            }
+            else if (n > second)
+            {
+                second = n;
+            }
+        }
+        return best - second >= ContextMargin ? bestFolder : "";
+    }
+
+    private static int CommonSuffixLength(string a, string b)
+    {
+        int i = a.Length - 1, j = b.Length - 1, n = 0;
+        while (i >= 0 && j >= 0 && a[i] == b[j]) { i--; j--; n++; }
+        return n;
+    }
+
+    /// <summary>문맥 비교에서 1등이 2등보다 이만큼(글자) 더 길게 맞아야 정한다.</summary>
+    private const int ContextMargin = 8;
+
+    /// <summary>
+    /// 패인의 커서 줄과 그 위 linesAbove 줄을 공백 없이 이어 붙인 것(셸 쪽 정규화와 같은 모양).
+    /// 선택 영역이 있으면 그 시작 줄이 나와 매칭이 안 될 뿐 해는 없다.
+    /// </summary>
+    private static string ReadCaretText(AutomationElement el, int linesAbove)
     {
         try
         {
@@ -539,7 +575,10 @@ public sealed class PaneTracker : IDisposable
             if (sel.Length == 0) return "";
             var range = sel[0].Clone();
             range.ExpandToEnclosingUnit(System.Windows.Automation.Text.TextUnit.Line);
-            return range.GetText(2000);
+            if (linesAbove > 0)
+                range.MoveEndpointByUnit(System.Windows.Automation.Text.TextPatternRangeEndpoint.Start,
+                    System.Windows.Automation.Text.TextUnit.Line, -linesAbove);
+            return ShellProcessScanner.NormalizeLine(range.GetText(20000));
         }
         catch
         {

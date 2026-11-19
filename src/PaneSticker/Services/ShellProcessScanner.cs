@@ -8,8 +8,11 @@ using System.Text.RegularExpressions;
 
 namespace PaneSticker.Services;
 
-/// <summary>제목이 겹치는 셸 하나. 커서 줄(정규화)로 패인과 짝을 맞춘다.</summary>
-public readonly record struct ShellCandidate(string CursorLine, string Folder);
+/// <summary>
+/// 제목이 겹치는 셸 하나. 커서 줄(정규화)로 패인과 짝을 맞추고,
+/// 커서 줄까지 같으면(예: Claude·Codex 입력창이 둘 다 "❯") 그 위 몇 줄을 이어 붙인 Context 로 가린다.
+/// </summary>
+public readonly record struct ShellCandidate(string CursorLine, string Context, string Folder);
 
 /// <summary>한 번 스캔한 결과.</summary>
 public sealed class ShellMap
@@ -158,7 +161,7 @@ public sealed class ShellProcessScanner
             bool stale = StaleCwdShells.Contains(nameOf[shell]);
 
             // 콘솔에 붙어 있는 구간은 최소로 유지한다. 경로 존재 확인 등은 떼어낸 뒤에 한다.
-            var (rawTitle, cursorLine, rawPrompt, idle) = ReadConsole(shell, readPrompt: stale);
+            var (rawTitle, cursorLine, context, rawPrompt, idle) = ReadConsole(shell, readPrompt: stale);
             string title = NormalizeTitle(rawTitle);
             if (title.Length == 0) continue;
 
@@ -170,7 +173,7 @@ public sealed class ShellProcessScanner
             // 폴더를 못 찾은 셸도 남긴다. 빼 버리면 같은 제목의 다른 셸 폴더가 이 패인에도 붙는다.
             if (!byTitle.TryGetValue(title, out var list))
                 byTitle[title] = list = new List<ShellCandidate>();
-            list.Add(new ShellCandidate(NormalizeLine(cursorLine), folder));
+            list.Add(new ShellCandidate(NormalizeLine(cursorLine), context, folder));
         }
 
         // 제목이 하나뿐이거나 겹쳐도 폴더가 같으면 바로 정한다.
@@ -314,7 +317,7 @@ public sealed class ShellProcessScanner
     /// 프롬프트 경로는 화면 전체가 아니라 커서가 있는 줄(과 줄바꿈된 직전 줄)만 본다.
     /// 그 줄이 "PS D:\path>" 형태일 때만 쓰므로 명령 출력 속 경로에 흔들리지 않는다.
     /// </summary>
-    private static (string Title, string CursorLine, string PromptPath, bool Idle) ReadConsole(int pid, bool readPrompt)
+    private static (string Title, string CursorLine, string Context, string PromptPath, bool Idle) ReadConsole(int pid, bool readPrompt)
     {
         EnsureCtrlHandler();
 
@@ -322,12 +325,12 @@ public sealed class ShellProcessScanner
         if (!AttachConsole(pid))
         {
             // 이미 다른 콘솔이 붙어 있으면 ACCESS_DENIED. 떼고 한 번만 다시 시도한다.
-            if (Marshal.GetLastWin32Error() != ERROR_ACCESS_DENIED) return ("", "", "", false);
+            if (Marshal.GetLastWin32Error() != ERROR_ACCESS_DENIED) return ("", "", "", "", false);
             FreeConsole();
             if (!AttachConsole(pid))
             {
                 Debug.WriteLine("[PaneSticker] AttachConsole failed: " + Marshal.GetLastWin32Error());
-                return ("", "", "", false);
+                return ("", "", "", "", false);
             }
         }
         try
@@ -335,12 +338,12 @@ public sealed class ShellProcessScanner
             var sb = new StringBuilder(1024);
             int n = GetConsoleTitleW(sb, sb.Capacity);
             string title = n > 0 ? sb.ToString() : "";
-            var (line, path, idle) = ReadCursor(readPrompt);
-            return (title, line, path, idle);
+            var (line, context, path, idle) = ReadCursor(readPrompt);
+            return (title, line, context, path, idle);
         }
         catch
         {
-            return ("", "", "", false);
+            return ("", "", "", "", false);
         }
         finally
         {
@@ -381,20 +384,21 @@ public sealed class ShellProcessScanner
     /// 존재 확인은 하지 않는다(호출부가 detach 후에).
     /// Idle = 커서 줄 하나만으로 프롬프트가 매칭됨 = 셸이 입력을 기다리는 중.
     /// </summary>
-    private static (string CursorLine, string Path, bool Idle) ReadCursor(bool readPrompt)
+    private static (string CursorLine, string Context, string Path, bool Idle) ReadCursor(bool readPrompt)
     {
         IntPtr h = CreateFileW("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
             IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-        if (h == IntPtr.Zero || h == new IntPtr(-1)) return ("", "", false);
+        if (h == IntPtr.Zero || h == new IntPtr(-1)) return ("", "", "", false);
         try
         {
-            if (!GetConsoleScreenBufferInfo(h, out var info)) return ("", "", false);
+            if (!GetConsoleScreenBufferInfo(h, out var info)) return ("", "", "", false);
             int width = info.dwSize.X;
             int cy = info.dwCursorPosition.Y;
-            if (width <= 0 || width > 2000 || cy < 0) return ("", "", false);
+            if (width <= 0 || width > 2000 || cy < 0) return ("", "", "", false);
 
             string cursorLine = ReadLine(h, cy, width);
-            if (!readPrompt) return (cursorLine, "", false);
+            string context = ReadContext(h, cy, width, cursorLine);
+            if (!readPrompt) return (cursorLine, context, "", false);
 
             // 직전 줄은 줄바꿈 이어붙이기용이라 다듬지 않고 원문 그대로 붙인다.
             string line = cursorLine;
@@ -405,14 +409,27 @@ public sealed class ShellProcessScanner
                 if (!m.Success) continue;
                 string path = m.Groups[1].Value.TrimEnd('\\', ' ');
                 if (path.Length == 2) path += "\\";   // "C:" -> "C:\"
-                return (cursorLine, path, back == 0);
+                return (cursorLine, context, path, back == 0);
             }
-            return (cursorLine, "", false);
+            return (cursorLine, context, "", false);
         }
         finally
         {
             CloseHandle(h);
         }
+    }
+
+    /// <summary>커서 줄 위로 이어 붙여 비교하는 줄 수. 패인 쪽(UIA)도 같은 수만큼 읽는다.</summary>
+    public const int ContextLines = 8;
+
+    /// <summary>커서 줄과 그 위 ContextLines 줄을 공백 없이 이어 붙인 것. 줄바꿈 위치 차이가 사라진다.</summary>
+    private static string ReadContext(IntPtr h, int cy, int width, string cursorLine)
+    {
+        var sb = new StringBuilder();
+        for (int y = Math.Max(0, cy - ContextLines); y < cy; y++)
+            sb.Append(NormalizeLine(ReadLine(h, y, width)));
+        sb.Append(NormalizeLine(cursorLine));
+        return sb.ToString();
     }
 
     private static string ReadLine(IntPtr h, int y, int width)
